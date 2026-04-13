@@ -4,8 +4,7 @@ import time
 import re
 import requests
 from datetime import datetime
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
+import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 
@@ -18,18 +17,13 @@ DATA_FILE   = "data/views_history.json"
 
 
 def get_driver():
-    options = Options()
-    options.add_argument("--headless=new")
+    options = uc.ChromeOptions()
+    options.add_argument("--window-size=1280,900")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1280,900")
-    options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    )
-    return webdriver.Chrome(options=options)
+    # version_main=146 ca sa se potriveasca cu Chrome-ul instalat
+    driver = uc.Chrome(options=options, headless=False, version_main=146)
+    return driver
 
 
 def scrape_listing(driver, url):
@@ -49,6 +43,11 @@ def scrape_listing(driver, url):
         time.sleep(5)
 
         source = driver.page_source
+
+        # ── Save full HTML for debugging ───────────────────────────────────
+        with open("debug_page.html", "w", encoding="utf-8") as f:
+            f.write(source)
+        print("  [debug] HTML salvat in debug_page.html")
 
         # ── Debug: dump relevant snippet ──────────────────────────────────
         idx = source.lower().find("vizualiz")
@@ -182,9 +181,9 @@ def build_message(results, today_str):
 
 
 def main():
-    today_str = datetime.utcnow().strftime("%Y-%m-%d")
+    today_str = datetime.now().strftime("%Y-%m-%d")
     listings  = load_json(CONFIG_FILE, [])
-    history   = load_json(DATA_FILE, {})  # { url: [{date, views, title}, ...] }
+    history   = load_json(DATA_FILE, {})
 
     if not listings:
         send_telegram("⚠️ *OLX Tracker*\n\nNu ai niciun anunț de urmărit.\nTrimite `/add <url>` pentru a adăuga unul.")
@@ -196,15 +195,13 @@ def main():
     try:
         for listing in listings:
             url = listing["url"]
-            print(f"Scraping: {url}")
+            print(f"\nScraping: {url}")
             title, views = scrape_listing(driver, url)
 
-            # Use stored title if scrape didn't get one
             url_history = history.get(url, [])
             if not title and url_history:
                 title = url_history[-1].get("title")
 
-            # Upsert today's entry
             existing = next((e for e in url_history if e["date"] == today_str), None)
             if existing:
                 existing.update({"views": views, "title": title})
@@ -212,11 +209,10 @@ def main():
                 url_history.append({"date": today_str, "views": views, "title": title})
             history[url] = url_history
 
-            # Compute delta and average
             delta, avg = None, None
             valid = [e for e in url_history if e.get("views") is not None]
-            if len(valid) >= 2:
-                delta = views - valid[-2]["views"] if views is not None else None
+            if len(valid) >= 2 and views is not None:
+                delta = views - valid[-2]["views"]
                 total = valid[-1]["views"] - valid[0]["views"]
                 avg   = round(total / len(valid)) if len(valid) > 1 else None
 
