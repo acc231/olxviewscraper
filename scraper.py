@@ -6,6 +6,8 @@ import requests
 from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
 
 # ── Config ────────────────────────────────────────────────────────────────────
 BOT_TOKEN   = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -31,45 +33,93 @@ def get_driver():
 
 
 def scrape_listing(driver, url):
-    """Returns (title, views) from an OLX listing. Both can be None on failure."""
+    """Returns (title, views) from an OLX listing."""
     try:
         driver.get(url)
-        time.sleep(6)
+
+        # Wait up to 15 seconds for the views element to appear in DOM
+        try:
+            WebDriverWait(driver, 15).until(
+                lambda d: re.search(r'[Vv]izualiz', d.page_source)
+            )
+        except Exception:
+            pass
+
+        # Extra wait for JS to finish rendering
+        time.sleep(5)
+
         source = driver.page_source
+
+        # ── Debug: dump relevant snippet ──────────────────────────────────
+        idx = source.lower().find("vizualiz")
+        if idx != -1:
+            print(f"  [debug] found 'vizualiz' at index {idx}: ...{source[max(0,idx-30):idx+80]}...")
+        else:
+            print("  [debug] 'vizualiz' NOT found in page source")
 
         # ── Title ──────────────────────────────────────────────────────────
         title = None
         title_patterns = [
-            r'<h1[^>]*class="[^"]*css-[^"]*"[^>]*>\s*([^<]+)\s*</h1>',
+            r'<h1[^>]*>\s*([^<]{10,}?)\s*</h1>',
             r'"name"\s*:\s*"([^"]{10,})"',
-            r'<title>([^|<]+)',
+            r'<title>([^|<]{10,})',
         ]
         for pat in title_patterns:
             m = re.search(pat, source, re.IGNORECASE)
             if m:
                 title = m.group(1).strip()
-                # Clean up OLX suffix like " • OLX.ro"
                 title = re.sub(r'\s*[•·|]\s*(OLX|Autovit).*$', '', title, flags=re.IGNORECASE).strip()
                 if len(title) > 8:
                     break
 
-        # ── Views ──────────────────────────────────────────────────────────
+        # ── Views — try DOM elements first ────────────────────────────────
         views = None
-        view_patterns = [
-            r'Vizualizari[^\d]*(\d[\d\s\xa0]*)',
-            r'vizualizari[^\d]*(\d[\d\s\xa0]*)',
-            r'"views"\s*:\s*(\d+)',
-            r'(\d[\d\s]*)\s*[Vv]izualiz',
-        ]
-        for pat in view_patterns:
-            m = re.search(pat, source, re.IGNORECASE)
-            if m:
-                raw = re.sub(r'[\s\xa0]', '', m.group(1))
-                try:
-                    views = int(raw)
+
+        # Method 1: look for elements containing "vizualiz" text
+        try:
+            elements = driver.find_elements(By.XPATH, "//*[contains(translate(text(),'VIZUALIZARI','vizualizari'),'vizualiz')]")
+            for el in elements:
+                text = el.text.strip()
+                print(f"  [dom] element text: {repr(text)}")
+                nums = re.findall(r'\d+', text.replace(" ", "").replace("\xa0", ""))
+                if nums:
+                    candidate = int(nums[0])
+                    if candidate > 0:
+                        views = candidate
+                        print(f"  [dom] found views={views}")
+                        break
+        except Exception as e:
+            print(f"  [dom] error: {e}")
+
+        # Method 2: regex on full page source
+        if views is None:
+            view_patterns = [
+                r'(\d[\d\s\xa0]{0,5})\s*[Vv]izualiz',
+                r'[Vv]izualiz[a-zări]*[^\d]{0,10}(\d[\d\s\xa0]*)',
+                r'"views"\s*:\s*(\d+)',
+                r'"viewCount"\s*:\s*(\d+)',
+                r'viewCount["\s:]+(\d+)',
+            ]
+            for pat in view_patterns:
+                m = re.search(pat, source, re.IGNORECASE)
+                if m:
+                    raw = re.sub(r'[\s\xa0]', '', m.group(1))
+                    try:
+                        views = int(raw)
+                        print(f"  [regex] pattern '{pat}' found views={views}")
+                        break
+                    except ValueError:
+                        continue
+
+        # Method 3: look in embedded JSON blobs
+        if views is None:
+            json_blobs = re.findall(r'\{[^{}]{0,2000}"views"[^{}]{0,500}\}', source)
+            for blob in json_blobs:
+                m = re.search(r'"views"\s*:\s*(\d+)', blob)
+                if m:
+                    views = int(m.group(1))
+                    print(f"  [json-blob] found views={views}")
                     break
-                except ValueError:
-                    continue
 
         return title, views
 
