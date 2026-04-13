@@ -28,9 +28,6 @@ def get_driver():
 
 
 def dismiss_popups(driver):
-    """Try to close cookie banners and any other popups."""
-
-    # Lista de selectori comuni pentru butoane de accept cookies pe OLX
     cookie_selectors = [
         (By.XPATH, "//button[contains(translate(text(),'ACCEPTA','accepta'),'accepta')]"),
         (By.XPATH, "//button[contains(translate(text(),'ACCEPT','accept'),'accept')]"),
@@ -42,7 +39,6 @@ def dismiss_popups(driver):
         (By.CSS_SELECTOR, "[id*='consent'] button"),
         (By.CSS_SELECTOR, "button#onetrust-accept-btn-handler"),
     ]
-
     for by, selector in cookie_selectors:
         try:
             btn = WebDriverWait(driver, 3).until(EC.element_to_be_clickable((by, selector)))
@@ -52,23 +48,43 @@ def dismiss_popups(driver):
             return True
         except Exception:
             continue
-
     print("  [popup] no popup found or already dismissed")
     return False
 
 
+def scrape_price(source):
+    """Extract price from page source."""
+    price_patterns = [
+        r'"price"\s*:\s*"([^"]+)"',
+        r'"price"\s*:\s*(\d+)',
+        r'(\d[\d\s]*)\s*€',
+        r'(\d[\d\s]*)\s*euro',
+        r'(\d[\d\s]*)\s*lei',
+    ]
+    for pat in price_patterns:
+        m = re.search(pat, source, re.IGNORECASE)
+        if m:
+            raw = m.group(1).strip()
+            # Check if it looks like a price (not too small, not too big)
+            nums = re.sub(r'[\s\xa0]', '', raw)
+            try:
+                val = int(nums)
+                if 100 <= val <= 9999999:
+                    # Try to get currency
+                    currency = "€" if "€" in source[max(0, m.start()-5):m.end()+10] else ""
+                    return f"{val:,} {currency}".strip()
+            except ValueError:
+                return raw
+    return "—"
+
+
 def scrape_listing(driver, url):
-    """Returns (title, views) from an OLX listing."""
+    """Returns (title, views, price) from an OLX listing."""
     try:
         driver.get(url)
-
-        # Wait for page to start loading
         time.sleep(3)
-
-        # Dismiss cookie popups
         dismiss_popups(driver)
 
-        # Wait for vizualizari to appear after popup dismissed
         try:
             WebDriverWait(driver, 15).until(
                 lambda d: re.search(r'[Vv]izualiz', d.page_source)
@@ -76,10 +92,7 @@ def scrape_listing(driver, url):
         except Exception:
             pass
 
-        # Extra wait for full JS render
         time.sleep(4)
-
-        # Scroll down to make sure lazy-loaded elements appear
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight / 2);")
         time.sleep(2)
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
@@ -87,42 +100,26 @@ def scrape_listing(driver, url):
 
         source = driver.page_source
 
-        # ── Save full HTML for debugging ───────────────────────────────────
-        with open("debug_page.html", "w", encoding="utf-8") as f:
-            f.write(source)
-        print("  [debug] HTML salvat in debug_page.html")
-
-        # ── Debug: dump relevant snippet ──────────────────────────────────
-        idx = source.lower().find("vizualiz")
-        if idx != -1:
-            print(f"  [debug] found 'vizualiz': ...{source[max(0,idx-30):idx+80]}...")
-        else:
-            print("  [debug] 'vizualiz' NOT found in page source")
-
         # ── Title ──────────────────────────────────────────────────────────
         title = None
-        title_patterns = [
-            r'<h1[^>]*>\s*([^<]{10,}?)\s*</h1>',
-            r'"name"\s*:\s*"([^"]{10,})"',
-            r'<title>([^|<]{10,})',
-        ]
-        for pat in title_patterns:
+        for pat in [r'<h1[^>]*>\s*([^<]{10,}?)\s*</h1>', r'"name"\s*:\s*"([^"]{10,})"', r'<title>([^|<]{10,})']:
             m = re.search(pat, source, re.IGNORECASE)
             if m:
-                title = m.group(1).strip()
-                title = re.sub(r'\s*[•·|]\s*(OLX|Autovit).*$', '', title, flags=re.IGNORECASE).strip()
+                title = re.sub(r'\s*[•·|]\s*(OLX|Autovit).*$', '', m.group(1).strip(), flags=re.IGNORECASE).strip()
                 if len(title) > 8:
                     break
 
-        # ── Views — try DOM elements first ────────────────────────────────
+        # ── Price ──────────────────────────────────────────────────────────
+        price = scrape_price(source)
+
+        # ── Views ──────────────────────────────────────────────────────────
         views = None
 
-        # Method 1: DOM elements
+        # Method 1: DOM
         try:
             elements = driver.find_elements(By.XPATH, "//*[contains(translate(text(),'VIZUALIZARI','vizualizari'),'vizualiz')]")
             for el in elements:
                 text = el.text.strip()
-                print(f"  [dom] element text: {repr(text)}")
                 nums = re.findall(r'\d+', text.replace(" ", "").replace("\xa0", ""))
                 if nums:
                     candidate = int(nums[0])
@@ -133,16 +130,14 @@ def scrape_listing(driver, url):
         except Exception as e:
             print(f"  [dom] error: {e}")
 
-        # Method 2: regex on page source
+        # Method 2: regex
         if views is None:
-            view_patterns = [
+            for pat in [
                 r'(\d[\d\s\xa0]{0,5})\s*[Vv]izualiz',
                 r'[Vv]izualiz[a-zări]*[^\d]{0,10}(\d[\d\s\xa0]*)',
                 r'"views"\s*:\s*(\d+)',
                 r'"viewCount"\s*:\s*(\d+)',
-                r'viewCount["\s:]+(\d+)',
-            ]
-            for pat in view_patterns:
+            ]:
                 m = re.search(pat, source, re.IGNORECASE)
                 if m:
                     raw = re.sub(r'[\s\xa0]', '', m.group(1))
@@ -155,19 +150,19 @@ def scrape_listing(driver, url):
 
         # Method 3: JSON blobs
         if views is None:
-            json_blobs = re.findall(r'\{[^{}]{0,2000}"views"[^{}]{0,500}\}', source)
-            for blob in json_blobs:
+            for blob in re.findall(r'\{[^{}]{0,2000}"views"[^{}]{0,500}\}', source):
                 m = re.search(r'"views"\s*:\s*(\d+)', blob)
                 if m:
                     views = int(m.group(1))
                     print(f"  [json-blob] found views={views}")
                     break
 
-        return title, views
+        print(f"  → title={title}, views={views}, price={price}")
+        return title, views, price
 
     except Exception as e:
         print(f"Error scraping {url}: {e}")
-        return None, None
+        return None, None, "—"
 
 
 def load_json(path, default):
@@ -195,15 +190,26 @@ def build_message(results, today_str):
     lines = [f"🚗 *OLX Tracker — {today_fmt}*", ""]
 
     for i, r in enumerate(results, 1):
-        title  = r.get("title") or r.get("url")
+        name   = r.get("custom_name") or r.get("title") or r.get("url")
         url    = r["url"]
         views  = r.get("views")
         delta  = r.get("delta")
         avg    = r.get("avg")
+        price  = r.get("price", "—")
+        day    = r.get("day", 1)
 
         lines.append(f"{'─'*30}")
-        lines.append(f"*{i}. {title}*")
+        lines.append(f"*{i}. {name}*")
         lines.append(f"🔗 {url}")
+        # Price with delta
+        price_delta = r.get("price_delta")
+        if price_delta is not None and price_delta != 0:
+            sign = "+" if price_delta >= 0 else ""
+            emoji = "💸" if price_delta < 0 else "📈"
+            price_line = f"📆 Ziua *{day}*  |  💰 *{price}* ({sign}{price_delta:,}) {emoji}"
+        else:
+            price_line = f"📆 Ziua *{day}*  |  💰 *{price}*"
+        lines.append(price_line)
 
         if views is None:
             lines.append("⚠️ Nu s-au putut citi vizualizările")
@@ -237,21 +243,31 @@ def main():
 
     try:
         for listing in listings:
-            url = listing["url"]
+            url         = listing["url"]
+            custom_name = listing.get("custom_name")
+            added_date  = listing.get("added_date", today_str)
+
             print(f"\nScraping: {url}")
-            title, views = scrape_listing(driver, url)
+            title, views, price = scrape_listing(driver, url)
 
             url_history = history.get(url, [])
-            if not title and url_history:
-                title = url_history[-1].get("title")
 
+            # Use stored title if scrape didn't get one
+            if not title and url_history:
+                title = next((e.get("title") for e in reversed(url_history) if e.get("title")), None)
+
+            # Upsert today's entry
             existing = next((e for e in url_history if e["date"] == today_str), None)
             if existing:
-                existing.update({"views": views, "title": title})
+                existing.update({"views": views, "title": title, "price": price})
             else:
-                url_history.append({"date": today_str, "views": views, "title": title})
+                url_history.append({"date": today_str, "views": views, "title": title, "price": price})
             history[url] = url_history
 
+            # Day number
+            day = len(url_history)
+
+            # Delta and average
             delta, avg = None, None
             valid = [e for e in url_history if e.get("views") is not None]
             if len(valid) >= 2 and views is not None:
@@ -259,8 +275,31 @@ def main():
                 total = valid[-1]["views"] - valid[0]["views"]
                 avg   = round(total / len(valid)) if len(valid) > 1 else None
 
-            results.append({"url": url, "title": title, "views": views, "delta": delta, "avg": avg})
-            print(f"  → title={title}, views={views}")
+            # Price delta vs yesterday
+            price_delta = None
+            valid_prices = [e for e in url_history if e.get("price") and e.get("price") != "—"]
+            if len(valid_prices) >= 2:
+                import re as _re
+                def _extract_num(s):
+                    nums = _re.sub(r"[^\d]", "", str(s))
+                    try: return int(nums) if nums else None
+                    except: return None
+                prev_p = _extract_num(valid_prices[-2]["price"])
+                curr_p = _extract_num(valid_prices[-1]["price"])
+                if prev_p and curr_p:
+                    price_delta = curr_p - prev_p
+
+            results.append({
+                "url": url,
+                "title": title,
+                "custom_name": custom_name,
+                "views": views,
+                "price": price,
+                "price_delta": price_delta,
+                "delta": delta,
+                "avg": avg,
+                "day": day,
+            })
 
     finally:
         driver.quit()
