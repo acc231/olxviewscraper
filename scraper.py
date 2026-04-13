@@ -7,6 +7,7 @@ from datetime import datetime
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 # ── Config ────────────────────────────────────────────────────────────────────
 BOT_TOKEN   = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -21,9 +22,39 @@ def get_driver():
     options.add_argument("--window-size=1280,900")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    # version_main=146 ca sa se potriveasca cu Chrome-ul instalat
+    options.add_argument("--lang=ro-RO")
     driver = uc.Chrome(options=options, headless=False, version_main=146)
     return driver
+
+
+def dismiss_popups(driver):
+    """Try to close cookie banners and any other popups."""
+
+    # Lista de selectori comuni pentru butoane de accept cookies pe OLX
+    cookie_selectors = [
+        (By.XPATH, "//button[contains(translate(text(),'ACCEPTA','accepta'),'accepta')]"),
+        (By.XPATH, "//button[contains(translate(text(),'ACCEPT','accept'),'accept')]"),
+        (By.XPATH, "//button[contains(@id,'accept')]"),
+        (By.XPATH, "//button[contains(@class,'accept')]"),
+        (By.XPATH, "//button[contains(@data-testid,'accept')]"),
+        (By.CSS_SELECTOR, "[id*='cookie'] button"),
+        (By.CSS_SELECTOR, "[class*='cookie'] button"),
+        (By.CSS_SELECTOR, "[id*='consent'] button"),
+        (By.CSS_SELECTOR, "button#onetrust-accept-btn-handler"),
+    ]
+
+    for by, selector in cookie_selectors:
+        try:
+            btn = WebDriverWait(driver, 3).until(EC.element_to_be_clickable((by, selector)))
+            btn.click()
+            print(f"  [popup] clicked: {selector}")
+            time.sleep(1)
+            return True
+        except Exception:
+            continue
+
+    print("  [popup] no popup found or already dismissed")
+    return False
 
 
 def scrape_listing(driver, url):
@@ -31,7 +62,13 @@ def scrape_listing(driver, url):
     try:
         driver.get(url)
 
-        # Wait up to 15 seconds for the views element to appear in DOM
+        # Wait for page to start loading
+        time.sleep(3)
+
+        # Dismiss cookie popups
+        dismiss_popups(driver)
+
+        # Wait for vizualizari to appear after popup dismissed
         try:
             WebDriverWait(driver, 15).until(
                 lambda d: re.search(r'[Vv]izualiz', d.page_source)
@@ -39,8 +76,14 @@ def scrape_listing(driver, url):
         except Exception:
             pass
 
-        # Extra wait for JS to finish rendering
-        time.sleep(5)
+        # Extra wait for full JS render
+        time.sleep(4)
+
+        # Scroll down to make sure lazy-loaded elements appear
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight / 2);")
+        time.sleep(2)
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(2)
 
         source = driver.page_source
 
@@ -52,7 +95,7 @@ def scrape_listing(driver, url):
         # ── Debug: dump relevant snippet ──────────────────────────────────
         idx = source.lower().find("vizualiz")
         if idx != -1:
-            print(f"  [debug] found 'vizualiz' at index {idx}: ...{source[max(0,idx-30):idx+80]}...")
+            print(f"  [debug] found 'vizualiz': ...{source[max(0,idx-30):idx+80]}...")
         else:
             print("  [debug] 'vizualiz' NOT found in page source")
 
@@ -74,7 +117,7 @@ def scrape_listing(driver, url):
         # ── Views — try DOM elements first ────────────────────────────────
         views = None
 
-        # Method 1: look for elements containing "vizualiz" text
+        # Method 1: DOM elements
         try:
             elements = driver.find_elements(By.XPATH, "//*[contains(translate(text(),'VIZUALIZARI','vizualizari'),'vizualiz')]")
             for el in elements:
@@ -90,7 +133,7 @@ def scrape_listing(driver, url):
         except Exception as e:
             print(f"  [dom] error: {e}")
 
-        # Method 2: regex on full page source
+        # Method 2: regex on page source
         if views is None:
             view_patterns = [
                 r'(\d[\d\s\xa0]{0,5})\s*[Vv]izualiz',
@@ -105,12 +148,12 @@ def scrape_listing(driver, url):
                     raw = re.sub(r'[\s\xa0]', '', m.group(1))
                     try:
                         views = int(raw)
-                        print(f"  [regex] pattern '{pat}' found views={views}")
+                        print(f"  [regex] found views={views}")
                         break
                     except ValueError:
                         continue
 
-        # Method 3: look in embedded JSON blobs
+        # Method 3: JSON blobs
         if views is None:
             json_blobs = re.findall(r'\{[^{}]{0,2000}"views"[^{}]{0,500}\}', source)
             for blob in json_blobs:
