@@ -1,0 +1,112 @@
+name: OLX Views Tracker
+
+on:
+  schedule:
+    # Daily scrape at 09:00 Romania time (07:00 UTC summer / 08:00 UTC winter)
+    - cron: "0 7 * * *"
+    # Bot polling: runs every 5 minutes to listen for Telegram commands
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "Which job to run"
+        required: false
+        default: "scrape"
+        type: choice
+        options:
+          - scrape
+          - bot
+
+jobs:
+  # ── Daily scrape ────────────────────────────────────────────────────────────
+  scrape:
+    name: Scrape & Notify
+    runs-on: ubuntu-latest
+    # Only run at 07:00 UTC or when manually triggered with job=scrape
+    if: |
+      (github.event_name == 'schedule' && github.event.schedule == '0 7 * * *') ||
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.job == 'scrape' || github.event.inputs.job == ''))
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Chrome
+        run: |
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update -q
+          sudo apt-get install -y google-chrome-stable
+
+      - name: Install Python deps
+        run: pip install selenium requests webdriver-manager
+
+      - name: Setup ChromeDriver
+        run: python -c "from webdriver_manager.chrome import ChromeDriverManager; ChromeDriverManager().install()"
+
+      - name: Restore cached data
+        uses: actions/cache@v4
+        with:
+          path: data/
+          key: olx-data-${{ github.run_id }}
+          restore-keys: olx-data-
+
+      - name: Run scraper
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python scraper.py
+
+      - name: Commit updated data
+        run: |
+          git config user.name  "olx-tracker-bot"
+          git config user.email "bot@olx-tracker"
+          git add data/
+          git diff --staged --quiet || git commit -m "📊 Views update $(date +'%Y-%m-%d')"
+          git push
+
+  # ── Telegram bot (polls every 5 min for commands) ─────────────────────────
+  bot:
+    name: Telegram Bot
+    runs-on: ubuntu-latest
+    if: |
+      (github.event_name == 'schedule' && github.event.schedule == '*/5 * * * *') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.job == 'bot')
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python deps
+        run: pip install requests
+
+      - name: Restore cached data
+        uses: actions/cache@v4
+        with:
+          path: data/
+          key: olx-data-${{ github.run_id }}
+          restore-keys: olx-data-
+
+      - name: Run bot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python bot.py
+
+      - name: Commit updated config
+        run: |
+          git config user.name  "olx-tracker-bot"
+          git config user.email "bot@olx-tracker"
+          git add data/
+          git diff --staged --quiet || git commit -m "🤖 Bot config update $(date +'%Y-%m-%d %H:%M')"
+          git push
