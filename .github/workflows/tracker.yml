@@ -44,7 +44,7 @@ jobs:
           sudo apt-get install -y google-chrome-stable
 
       - name: Install Python deps
-        run: pip install selenium requests webdriver-manager
+        run: pip install selenium requests "undetected-chromedriver==3.5.5" setuptools
 
       - name: Setup ChromeDriver
         run: python -c "from webdriver_manager.chrome import ChromeDriverManager; ChromeDriverManager().install()"
