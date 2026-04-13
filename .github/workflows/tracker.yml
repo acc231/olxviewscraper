@@ -2,9 +2,7 @@ name: OLX Views Tracker
 
 on:
   schedule:
-    # Daily scrape at 09:00 Romania time (07:00 UTC summer / 08:00 UTC winter)
     - cron: "0 7 * * *"
-    # Bot polling: runs every 5 minutes to listen for Telegram commands
     - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
@@ -18,11 +16,9 @@ on:
           - bot
 
 jobs:
-  # ── Daily scrape ────────────────────────────────────────────────────────────
   scrape:
     name: Scrape & Notify
     runs-on: ubuntu-latest
-    # Only run at 07:00 UTC or when manually triggered with job=scrape
     if: |
       (github.event_name == 'schedule' && github.event.schedule == '0 7 * * *') ||
       (github.event_name == 'workflow_dispatch' && (github.event.inputs.job == 'scrape' || github.event.inputs.job == ''))
@@ -43,11 +39,11 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y google-chrome-stable
 
+      - name: Install Xvfb
+        run: sudo apt-get install -y xvfb
+
       - name: Install Python deps
         run: pip install selenium requests "undetected-chromedriver==3.5.5" setuptools
-
-      - name: Setup ChromeDriver
-        run: python -c "from webdriver_manager.chrome import ChromeDriverManager; ChromeDriverManager().install()"
 
       - name: Restore cached data
         uses: actions/cache@v4
@@ -56,11 +52,15 @@ jobs:
           key: olx-data-${{ github.run_id }}
           restore-keys: olx-data-
 
-      - name: Run scraper
+      - name: Run scraper with virtual display
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python scraper.py
+          DISPLAY: :99
+        run: |
+          Xvfb :99 -screen 0 1280x900x24 &
+          sleep 2
+          python scraper.py
 
       - name: Commit updated data
         run: |
@@ -70,7 +70,6 @@ jobs:
           git diff --staged --quiet || git commit -m "📊 Views update $(date +'%Y-%m-%d')"
           git push
 
-  # ── Telegram bot (polls every 5 min for commands) ─────────────────────────
   bot:
     name: Telegram Bot
     runs-on: ubuntu-latest
