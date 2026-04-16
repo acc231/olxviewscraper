@@ -1,13 +1,13 @@
 """
-bot.py — Handles Telegram commands to manage tracked listings.
+bot.py — OLX Tracker Telegram Bot
 
 Commands:
-  /add <url> [nume]   — Add a new OLX listing with optional custom name
-  /list               — Show all currently tracked listings
-  /remove <index>     — Remove listing by number
-  /rename <nr> <nume> — Rename a listing
-  /stats <nr>         — Full history with views delta, price delta, averages
-  /help               — Show available commands
+  /add <url> [nume]   — Adaugă anunț (scrape imediat ca punct de start)
+  /list               — Lista anunțurilor cu delta vizualizări
+  /remove <nr>        — Șterge anunț
+  /rename <nr> <nume> — Redenumește anunț
+  /stats <nr>         — Istoric complet
+  /help               — Comenzi disponibile
 """
 
 import os
@@ -17,21 +17,14 @@ import re
 import requests
 
 BOT_TOKEN    = os.environ["TELEGRAM_BOT_TOKEN"]
-CHAT_ID      = os.environ["TELEGRAM_CHAT_ID"]
+CHAT_ID      = os.environ["TELEGRAM_CHAT_ID"]  # primary chat
 CONFIG_FILE  = "data/listings.json"
 HISTORY_FILE = "data/views_history.json"
 OFFSET_FILE  = "data/telegram_offset.json"
+CHATS_FILE   = "data/allowed_chats.json"
 
 
-def send(text, parse_mode="Markdown"):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    requests.post(url, json={
-        "chat_id": CHAT_ID,
-        "text": text,
-        "parse_mode": parse_mode,
-        "disable_web_page_preview": True
-    }, timeout=15)
-
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def load_json(path, default):
     if os.path.exists(path):
@@ -46,6 +39,38 @@ def save_json(path, data):
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
+def get_allowed_chats():
+    """Load allowed chat IDs. Always includes primary CHAT_ID."""
+    chats = load_json(CHATS_FILE, [])
+    primary = str(CHAT_ID)
+    if primary not in [str(c) for c in chats]:
+        chats.append(primary)
+        save_json(CHATS_FILE, chats)
+    return [str(c) for c in chats]
+
+
+def send_to(chat_id, text, parse_mode="Markdown"):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    try:
+        requests.post(url, json={
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": parse_mode,
+            "disable_web_page_preview": True
+        }, timeout=15)
+    except Exception as e:
+        print(f"Failed to send to {chat_id}: {e}")
+
+
+def send(text, chat_id=None, parse_mode="Markdown"):
+    """Send to specific chat or all allowed chats."""
+    if chat_id:
+        send_to(chat_id, text, parse_mode)
+    else:
+        for cid in get_allowed_chats():
+            send_to(cid, text, parse_mode)
+
+
 def get_updates(offset=None):
     params = {"timeout": 20, "allowed_updates": ["message"]}
     if offset:
@@ -58,11 +83,10 @@ def get_updates(offset=None):
 
 
 def is_valid_olx_url(url):
-    return re.match(r'https?://(www\.)?olx\.ro/', url) is not None
+    return bool(re.match(r'https?://(www\.)?olx\.ro/', url))
 
 
 def extract_price_number(price_str):
-    """Extract numeric value from price string like '13,490 €' or '13490'."""
     if not price_str or price_str == "—":
         return None
     nums = re.sub(r'[^\d]', '', str(price_str))
@@ -72,10 +96,14 @@ def extract_price_number(price_str):
         return None
 
 
-def cmd_add(args):
+
+
+# ── Commands ──────────────────────────────────────────────────────────────────
+
+def cmd_add(args, reply_chat):
     listings = load_json(CONFIG_FILE, [])
     if not args:
-        send("❌ Trimite un URL după comandă.\nExemplu:\n`/add https://www.olx.ro/... Kadjar Albastru`")
+        send("❌ Exemplu:\n`/add https://www.olx.ro/... Kadjar Albastru`", chat_id=reply_chat)
         return
 
     parts = args.strip().split(None, 1)
@@ -83,17 +111,19 @@ def cmd_add(args):
     name  = parts[1].strip() if len(parts) > 1 else None
 
     if not is_valid_olx_url(url):
-        send("❌ URL invalid. Trebuie să fie un link de pe *olx.ro*.")
+        send("❌ URL invalid. Trebuie să fie un link de pe *olx.ro*.", chat_id=reply_chat)
         return
 
     if any(l["url"] == url for l in listings):
-        send("⚠️ Acest anunț este deja urmărit!")
+        send("⚠️ Acest anunț este deja urmărit!", chat_id=reply_chat)
         return
 
     from datetime import datetime
+    today_str = datetime.now().strftime("%Y-%m-%d")
+
     entry = {
         "url": url,
-        "added_date": datetime.now().strftime("%Y-%m-%d"),
+        "added_date": today_str,
     }
     if name:
         entry["custom_name"] = name
@@ -101,16 +131,22 @@ def cmd_add(args):
     listings.append(entry)
     save_json(CONFIG_FILE, listings)
 
-    display = f"*{name}*\n🔗 {url}" if name else f"🔗 {url}"
-    send(f"✅ Anunț adăugat!\n{display}\n\nPrimul raport vine mâine la 09:00. Ziua 1 începe azi!")
+    display = name or url
+    send(
+        f"✅ *{display}* adăugat!\n"
+        f"🔗 {url}\n\n"
+        f"📊 Prima citire vine mâine la *09:00* — atunci începe Ziua 1.\n"
+        f"Poți adăuga mai multe linkuri cu `/add` înainte de atunci.",
+        chat_id=reply_chat
+    )
 
 
-def cmd_list():
+def cmd_list(reply_chat):
     listings = load_json(CONFIG_FILE, [])
     history  = load_json(HISTORY_FILE, {})
 
     if not listings:
-        send("📋 Nu urmărești niciun anunț.\nFolosește `/add <url>` pentru a adăuga unul.")
+        send("📋 Nu urmărești niciun anunț.\nFolosește `/add <url>` pentru a adăuga unul.", chat_id=reply_chat)
         return
 
     lines = ["📋 *Anunțuri urmărite:*", ""]
@@ -121,11 +157,11 @@ def cmd_list():
         url_history = history.get(url, [])
         days        = len(url_history)
 
-        latest      = url_history[-1] if url_history else None
-        views       = f"{latest['views']:,}" if latest and latest.get("views") is not None else "—"
-        price       = latest.get("price", "—") if latest else "—"
+        latest    = url_history[-1] if url_history else None
+        views     = latest.get("views") if latest else None
+        price     = latest.get("price", "—") if latest else "—"
+        views_str = f"{views:,}" if views is not None else "—"
 
-        # Views delta vs yesterday
         valid = [e for e in url_history if e.get("views") is not None]
         delta_str = ""
         if len(valid) >= 2:
@@ -135,23 +171,23 @@ def cmd_list():
             delta_str = f" {arrow}{sign}{delta}"
 
         lines.append(f"*{i}.* {name}")
-        lines.append(f"    👁 {views}{delta_str}  |  💰 {price}  |  📆 Ziua {days}")
+        lines.append(f"    👁 {views_str}{delta_str}  |  💰 {price}  |  📆 Ziua {days}")
         lines.append(f"    🔗 {url}")
         lines.append("")
 
     lines.append(f"Total: *{len(listings)}* anunțuri")
-    lines.append("Detalii cu `/stats <număr>` • Șterge cu `/remove <număr>`")
-    send("\n".join(lines))
+    lines.append("Detalii cu `/stats <nr>` • Șterge cu `/remove <nr>`")
+    send("\n".join(lines), chat_id=reply_chat)
 
 
-def cmd_remove(args):
+def cmd_remove(args, reply_chat):
     listings = load_json(CONFIG_FILE, [])
     if not listings:
-        send("📋 Nu ai niciun anunț de șters.")
+        send("📋 Nu ai niciun anunț de șters.", chat_id=reply_chat)
         return
 
     if not args:
-        send("❌ Specifică numărul.\nExemplu: `/remove 2`")
+        send("❌ Exemplu: `/remove 2`", chat_id=reply_chat)
         return
 
     try:
@@ -159,24 +195,24 @@ def cmd_remove(args):
         if idx < 0 or idx >= len(listings):
             raise ValueError
     except ValueError:
-        send(f"❌ Număr invalid. Alege între 1 și {len(listings)}.")
+        send(f"❌ Număr invalid. Alege între 1 și {len(listings)}.", chat_id=reply_chat)
         return
 
     removed = listings.pop(idx)
     save_json(CONFIG_FILE, listings)
     name = removed.get("custom_name") or removed.get("title") or removed["url"]
-    send(f"🗑 Anunț șters:\n*{name}*")
+    send(f"🗑 Anunț șters:\n*{name}*", chat_id=reply_chat)
 
 
-def cmd_rename(args):
+def cmd_rename(args, reply_chat):
     listings = load_json(CONFIG_FILE, [])
     if not args:
-        send("❌ Exemplu: `/rename 1 Kadjar Albastru Cluj`")
+        send("❌ Exemplu: `/rename 1 Kadjar Albastru Cluj`", chat_id=reply_chat)
         return
 
     parts = args.strip().split(None, 1)
     if len(parts) < 2:
-        send("❌ Exemplu: `/rename 1 Kadjar Albastru Cluj`")
+        send("❌ Exemplu: `/rename 1 Kadjar Albastru Cluj`", chat_id=reply_chat)
         return
 
     try:
@@ -184,25 +220,25 @@ def cmd_rename(args):
         if idx < 0 or idx >= len(listings):
             raise ValueError
     except ValueError:
-        send(f"❌ Număr invalid. Alege între 1 și {len(listings)}.")
+        send(f"❌ Număr invalid. Alege între 1 și {len(listings)}.", chat_id=reply_chat)
         return
 
     new_name = parts[1].strip()
     listings[idx]["custom_name"] = new_name
     save_json(CONFIG_FILE, listings)
-    send(f"✏️ Anunțul {idx+1} se numește acum: *{new_name}*")
+    send(f"✏️ Anunțul {idx+1} se numește acum: *{new_name}*", chat_id=reply_chat)
 
 
-def cmd_stats(args):
+def cmd_stats(args, reply_chat):
     listings = load_json(CONFIG_FILE, [])
     history  = load_json(HISTORY_FILE, {})
 
     if not listings:
-        send("📋 Nu urmărești niciun anunț.")
+        send("📋 Nu urmărești niciun anunț.", chat_id=reply_chat)
         return
 
     if not args:
-        send("❌ Exemplu: `/stats 1`")
+        send("❌ Exemplu: `/stats 1`", chat_id=reply_chat)
         return
 
     try:
@@ -210,7 +246,7 @@ def cmd_stats(args):
         if idx < 0 or idx >= len(listings):
             raise ValueError
     except ValueError:
-        send(f"❌ Număr invalid. Alege între 1 și {len(listings)}.")
+        send(f"❌ Număr invalid. Alege între 1 și {len(listings)}.", chat_id=reply_chat)
         return
 
     listing     = listings[idx]
@@ -219,75 +255,67 @@ def cmd_stats(args):
     url_history = history.get(url, [])
 
     if not url_history:
-        send(f"📊 *{name}*\n\nNu există date încă. Primul raport vine mâine la 09:00.")
+        send(f"📊 *{name}*\n\nNu există date încă.", chat_id=reply_chat)
         return
 
     lines = [f"📊 *{name}*", f"🔗 {url}", f"{'━'*28}", ""]
 
-    valid_views = [e for e in url_history if e.get("views") is not None]
-    valid_prices = [e for e in url_history if e.get("price") and e.get("price") != "—"]
-
-    # Build day-by-day table
     for day_num, entry in enumerate(url_history, 1):
-        date  = entry.get("date", "")[5:]  # MM-DD
+        date  = entry.get("date", "")[5:]
         views = entry.get("views")
         price = entry.get("price", "—")
 
-        # Views delta vs previous valid entry
-        prev_valid_views = [e for e in url_history[:url_history.index(entry)] if e.get("views") is not None]
-        if prev_valid_views and views is not None:
-            delta = views - prev_valid_views[-1]["views"]
+        prev_views  = [e for e in url_history[:url_history.index(entry)] if e.get("views") is not None]
+        prev_prices = [e for e in url_history[:url_history.index(entry)] if e.get("price") and e.get("price") != "—"]
+
+        if prev_views and views is not None:
+            delta = views - prev_views[-1]["views"]
             sign  = "+" if delta >= 0 else ""
             arrow = "📈" if delta > 0 else ("📉" if delta < 0 else "➡️")
             views_str = f"{views:,} {arrow}{sign}{delta}"
         else:
             views_str = f"{views:,}" if views is not None else "—"
 
-        # Price delta vs previous valid price
-        prev_valid_prices = [e for e in url_history[:url_history.index(entry)] if e.get("price") and e.get("price") != "—"]
         price_str = price
-        if prev_valid_prices and price and price != "—":
-            prev_price_num = extract_price_number(prev_valid_prices[-1]["price"])
-            curr_price_num = extract_price_number(price)
-            if prev_price_num and curr_price_num and prev_price_num != curr_price_num:
-                diff = curr_price_num - prev_price_num
-                sign = "+" if diff >= 0 else ""
-                emoji = "💸" if diff < 0 else "💰"
+        if prev_prices and price and price != "—":
+            prev_p = extract_price_number(prev_prices[-1]["price"])
+            curr_p = extract_price_number(price)
+            if prev_p and curr_p and prev_p != curr_p:
+                diff  = curr_p - prev_p
+                sign  = "+" if diff >= 0 else ""
+                emoji = "💸" if diff < 0 else "📈"
                 price_str = f"{price} {emoji}{sign}{diff:,}"
 
         lines.append(f"*Ziua {day_num}* ({date})")
-        lines.append(f"  👁 {views_str}")
-        lines.append(f"  💰 {price_str}")
+        lines.append(f"  👁 {views_str}  |  💰 {price_str}")
 
     lines.append("")
     lines.append(f"{'━'*28}")
 
-    # Summary
+    valid_views  = [e for e in url_history if e.get("views") is not None]
+    valid_prices = [e for e in url_history if e.get("price") and e.get("price") != "—"]
+
     if len(valid_views) >= 2:
-        total_views = valid_views[-1]["views"] - valid_views[0]["views"]
-        avg_views   = round(total_views / len(valid_views))
-        sign        = "+" if total_views >= 0 else ""
-        lines.append(f"👁 Total vizualizări: *{sign}{total_views}*")
-        lines.append(f"📊 Medie zilnică: *{sign}{avg_views}*/zi")
+        total = valid_views[-1]["views"] - valid_views[0]["views"]
+        avg   = round(total / (len(valid_views) - 1)) if len(valid_views) > 1 else 0
+        sign  = "+" if total >= 0 else ""
+        lines.append(f"👁 Total: *{sign}{total}*  |  📊 Medie: *{sign}{avg}*/zi")
 
     if len(valid_prices) >= 2:
-        first_price = extract_price_number(valid_prices[0]["price"])
-        last_price  = extract_price_number(valid_prices[-1]["price"])
-        if first_price and last_price:
-            price_diff = last_price - first_price
-            sign       = "+" if price_diff >= 0 else ""
-            emoji      = "💸" if price_diff < 0 else ("📈" if price_diff > 0 else "➡️")
-            lines.append(f"💰 Preț inițial: *{valid_prices[0]['price']}* → *{valid_prices[-1]['price']}* ({sign}{price_diff:,}) {emoji}")
+        p1 = extract_price_number(valid_prices[0]["price"])
+        p2 = extract_price_number(valid_prices[-1]["price"])
+        if p1 and p2:
+            diff  = p2 - p1
+            sign  = "+" if diff >= 0 else ""
+            emoji = "💸" if diff < 0 else ("📈" if diff > 0 else "➡️")
+            lines.append(f"💰 Preț: *{valid_prices[0]['price']}* → *{valid_prices[-1]['price']}* ({sign}{diff:,}) {emoji}")
 
     lines.append(f"📆 Urmărit de *{len(url_history)}* zile")
 
-    # Send in chunks if too long
     full_text = "\n".join(lines)
     if len(full_text) > 4000:
-        # Send last 20 days only
-        short_lines = [f"📊 *{name}* — ultimele 20 zile", f"🔗 {url}", f"{'━'*28}", ""]
-        recent = url_history[-20:]
-        for day_num, entry in enumerate(recent, len(url_history) - len(recent) + 1):
+        short = [f"📊 *{name}* — ultimele 20 zile", f"🔗 {url}", f"{'━'*28}", ""]
+        for day_num, entry in enumerate(url_history[-20:], len(url_history) - 19):
             date  = entry.get("date", "")[5:]
             views = entry.get("views")
             price = entry.get("price", "—")
@@ -298,32 +326,36 @@ def cmd_stats(args):
                 views_str = f"{views:,} ({sign}{delta})"
             else:
                 views_str = f"{views:,}" if views is not None else "—"
-            short_lines.append(f"*Z{day_num}* ({date}): 👁 {views_str}  💰 {price}")
-        send("\n".join(short_lines))
+            short.append(f"*Z{day_num}* ({date}): 👁 {views_str}  💰 {price}")
+        send("\n".join(short), chat_id=reply_chat)
     else:
-        send(full_text)
+        send(full_text, chat_id=reply_chat)
 
 
-def cmd_help():
+def cmd_help(reply_chat):
     send(
         "🤖 *OLX Tracker — Comenzi*\n\n"
-        "`/add <url>` — Adaugă anunț\n"
+        "`/add <url>` — Adaugă anunț (scrape imediat)\n"
         "`/add <url> Nume` — Adaugă cu nume personalizat\n"
         "`/list` — Toate anunțurile + delta vizualizări\n"
-        "`/stats <nr>` — Istoric complet: vizualizări, preț, delta, medie\n"
-        "`/rename <nr> Nume nou` — Redenumește un anunț\n"
-        "`/remove <nr>` — Șterge un anunț\n"
+        "`/stats <nr>` — Istoric complet\n"
+        "`/rename <nr> Nume` — Redenumește anunț\n"
+        "`/remove <nr>` — Șterge anunț\n"
         "`/help` — Această listă\n\n"
-        "Raportul zilnic se trimite automat la *09:00* 🇷🇴"
+        "Raportul zilnic vine automat la *09:00* 🇷🇴\n"
+        "Botul verifică comenzi la fiecare *30 minute*",
+        chat_id=reply_chat
     )
 
+
+# ── Main loop ─────────────────────────────────────────────────────────────────
 
 def process_update(update):
     msg     = update.get("message", {})
     text    = msg.get("text", "").strip()
     chat_id = str(msg.get("chat", {}).get("id", ""))
 
-    if chat_id != str(CHAT_ID):
+    if chat_id not in get_allowed_chats():
         print(f"Ignored message from unauthorized chat {chat_id}")
         return
 
@@ -334,22 +366,22 @@ def process_update(update):
     command = parts[0].lower().split("@")[0]
     args    = parts[1] if len(parts) > 1 else ""
 
-    print(f"Command: {command} | Args: {args}")
+    print(f"Command: {command} | Args: {args} | Chat: {chat_id}")
 
     if command == "/add":
-        cmd_add(args)
+        cmd_add(args, chat_id)
     elif command == "/list":
-        cmd_list()
+        cmd_list(chat_id)
     elif command == "/remove":
-        cmd_remove(args)
+        cmd_remove(args, chat_id)
     elif command == "/rename":
-        cmd_rename(args)
+        cmd_rename(args, chat_id)
     elif command == "/stats":
-        cmd_stats(args)
+        cmd_stats(args, chat_id)
     elif command in ("/help", "/start"):
-        cmd_help()
+        cmd_help(chat_id)
     else:
-        send(f"❓ Comandă necunoscută: `{command}`\nScrie `/help` pentru lista de comenzi.")
+        send(f"❓ Comandă necunoscută: `{command}`\nScrie `/help`", chat_id=chat_id)
 
 
 def main():
