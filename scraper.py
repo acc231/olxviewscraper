@@ -179,10 +179,24 @@ def save_json(path, data):
 
 
 def send_telegram(message):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown", "disable_web_page_preview": True}
-    resp = requests.post(url, json=payload, timeout=15)
-    resp.raise_for_status()
+    """Send to all allowed chats."""
+    chats_file = "data/allowed_chats.json"
+    if os.path.exists(chats_file):
+        with open(chats_file, "r", encoding="utf-8") as f:
+            chats = json.load(f)
+    else:
+        chats = [CHAT_ID]
+    # Always include primary CHAT_ID
+    if str(CHAT_ID) not in [str(c) for c in chats]:
+        chats.append(CHAT_ID)
+    for chat_id in chats:
+        try:
+            url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+            payload = {"chat_id": chat_id, "text": message, "parse_mode": "Markdown", "disable_web_page_preview": True}
+            resp = requests.post(url, json=payload, timeout=15)
+            resp.raise_for_status()
+        except Exception as e:
+            print(f"Failed to send to {chat_id}: {e}")
 
 
 def build_message(results, today_str):
@@ -273,7 +287,7 @@ def main():
             if len(valid) >= 2 and views is not None:
                 delta = views - valid[-2]["views"]
                 total = valid[-1]["views"] - valid[0]["views"]
-                avg   = round(total / len(valid)) if len(valid) > 1 else None
+                avg   = round(total / (len(valid) - 1)) if len(valid) > 1 else None
 
             # Price delta vs yesterday
             price_delta = None
