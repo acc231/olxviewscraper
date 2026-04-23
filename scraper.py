@@ -199,31 +199,35 @@ def send_telegram(message):
             print(f"Failed to send to {chat_id}: {e}")
 
 
-def build_message(results, today_str):
+def build_messages(results, today_str):
+    """Returns a list of messages — header + one message per listing."""
     today_fmt = datetime.strptime(today_str, "%Y-%m-%d").strftime("%d %b %Y")
-    lines = [f"🚗 *OLX Tracker — {today_fmt}*", ""]
+    messages = []
 
+    # Header
+    messages.append(f"🚗 *OLX Tracker — {today_fmt}*\n📋 {len(results)} anunțuri urmărite")
+
+    # One message per listing
     for i, r in enumerate(results, 1):
-        name   = r.get("custom_name") or r.get("title") or r.get("url")
-        url    = r["url"]
-        views  = r.get("views")
-        delta  = r.get("delta")
-        avg    = r.get("avg")
-        price  = r.get("price", "—")
-        day    = r.get("day", 1)
+        name  = r.get("custom_name") or r.get("title") or r.get("url")
+        url   = r["url"]
+        views = r.get("views")
+        delta = r.get("delta")
+        avg   = r.get("avg")
+        price = r.get("price", "—")
+        day   = r.get("day", 1)
 
-        lines.append(f"{'─'*30}")
+        lines = []
         lines.append(f"*{i}. {name}*")
         lines.append(f"🔗 {url}")
-        # Price with delta
+
         price_delta = r.get("price_delta")
         if price_delta is not None and price_delta != 0:
-            sign = "+" if price_delta >= 0 else ""
+            sign  = "+" if price_delta >= 0 else ""
             emoji = "💸" if price_delta < 0 else "📈"
-            price_line = f"📆 Ziua *{day}*  |  💰 *{price}* ({sign}{price_delta:,}) {emoji}"
+            lines.append(f"📆 Ziua *{day}*  |  💰 *{price}* ({sign}{price_delta:,}) {emoji}")
         else:
-            price_line = f"📆 Ziua *{day}*  |  💰 *{price}*"
-        lines.append(price_line)
+            lines.append(f"📆 Ziua *{day}*  |  💰 *{price}*")
 
         if views is None:
             lines.append("⚠️ Nu s-au putut citi vizualizările")
@@ -236,11 +240,9 @@ def build_message(results, today_str):
             if avg is not None:
                 lines.append(f"📊 Medie zilnică: *+{avg}*/zi")
 
-        lines.append("")
+        messages.append("\n".join(lines))
 
-    lines.append(f"{'─'*30}")
-    lines.append(f"📋 Total urmărite: *{len(results)}* anunțuri")
-    return "\n".join(lines)
+    return messages
 
 
 def main():
@@ -320,9 +322,11 @@ def main():
 
     save_json(DATA_FILE, history)
 
-    message = build_message(results, today_str)
-    print("\n" + message)
-    send_telegram(message)
+    messages = build_messages(results, today_str)
+    for message in messages:
+        print("\n" + message)
+        send_telegram(message)
+        time.sleep(1)  # avoid Telegram rate limit
 
 
 if __name__ == "__main__":
