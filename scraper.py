@@ -237,8 +237,10 @@ def build_messages(results, today_str):
                 arrow = "📈" if delta > 0 else ("📉" if delta < 0 else "➡️")
                 sign  = "+" if delta >= 0 else ""
                 lines.append(f"{arrow} Față de ieri: *{sign}{delta}*")
-            if avg is not None:
+            if avg is not None and avg > 0:
                 lines.append(f"📊 Medie zilnică: *+{avg}*/zi")
+                est_days = round(views / avg)
+                lines.append(f"⏳ Zile estimate în stoc: *{est_days}*")
 
         messages.append("\n".join(lines))
 
