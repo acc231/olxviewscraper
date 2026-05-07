@@ -23,7 +23,7 @@ def get_driver():
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--lang=ro-RO")
-    driver = uc.Chrome(options=options, headless=False, version_main=146)
+    driver = uc.Chrome(options=options, headless=False)
     return driver
 
 
