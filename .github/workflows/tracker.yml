@@ -42,7 +42,7 @@ jobs:
         run: sudo apt-get install -y xvfb
 
       - name: Install Python deps
-        run: pip install selenium requests "undetected-chromedriver==3.5.5" setuptools
+        run: pip install selenium requests webdriver-manager
 
       - name: Restore cached data
         uses: actions/cache@v4
