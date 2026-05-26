@@ -19,9 +19,8 @@ DATA_FILE   = "data/views_history.json"
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def get_driver():
+def get_driver(mobile=False):
     options = webdriver.ChromeOptions()
-    options.add_argument("--window-size=1280,900")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
@@ -29,11 +28,22 @@ def get_driver():
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
-    options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    )
+
+    if mobile:
+        options.add_argument("--window-size=412,915")
+        options.add_experimental_option("mobileEmulation", {"deviceName": "iPhone 12 Pro"})
+        options.add_argument(
+            "user-agent=Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1"
+        )
+    else:
+        options.add_argument("--window-size=1280,900")
+        options.add_argument(
+            "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        )
+
     service = Service(ChromeDriverManager().install())
     driver = webdriver.Chrome(service=service, options=options)
     driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
@@ -269,8 +279,9 @@ def main():
         send_telegram("⚠️ *OLX Tracker*\n\nNu ai niciun anunț de urmărit.\nTrimite `/add <url>` pentru a adăuga unul.")
         return
 
-    driver  = get_driver()
+    driver  = get_driver(mobile=False)
     results = []
+    mobile_retry_urls = []  # URLs that need mobile fallback
 
     try:
         for listing in listings:
@@ -280,6 +291,11 @@ def main():
 
             print(f"\nScraping: {url}")
             title, views, price = scrape_listing(driver, url)
+
+            if views is None:
+                print(f"  [desktop] no views found, queuing for mobile retry")
+                mobile_retry_urls.append((listing, title, price))
+                continue
 
             url_history = history.get(url, [])
 
@@ -334,6 +350,79 @@ def main():
 
     finally:
         driver.quit()
+
+    # ── Mobile fallback for listings where desktop found no views ─────────
+    if mobile_retry_urls:
+        print(f"\n{'='*60}")
+        print(f"Mobile fallback: retrying {len(mobile_retry_urls)} listings")
+        print(f"{'='*60}")
+        mobile_driver = get_driver(mobile=True)
+        try:
+            for listing, desktop_title, desktop_price in mobile_retry_urls:
+                url         = listing["url"]
+                custom_name = listing.get("custom_name")
+
+                print(f"\n[mobile] Scraping: {url}")
+                m_title, m_views, m_price = scrape_listing(mobile_driver, url)
+
+                # Use best data from desktop + mobile
+                title = desktop_title or m_title
+                views = m_views       # mobile views (may still be None)
+                price = desktop_price if desktop_price != "—" else m_price
+
+                if m_views is not None:
+                    print(f"  [mobile] found views={m_views}")
+                else:
+                    print(f"  [mobile] still no views found, skipping")
+
+                url_history = history.get(url, [])
+
+                if not title and url_history:
+                    title = next((e.get("title") for e in reversed(url_history) if e.get("title")), None)
+
+                existing = next((e for e in url_history if e["date"] == today_str), None)
+                if existing:
+                    existing.update({"views": views, "title": title, "price": price})
+                else:
+                    url_history.append({"date": today_str, "views": views, "title": title, "price": price})
+                history[url] = url_history
+
+                day = len(url_history)
+
+                delta, avg = None, None
+                valid = [e for e in url_history if e.get("views") is not None]
+                if len(valid) >= 2 and views is not None:
+                    delta = views - valid[-2]["views"]
+                    total = valid[-1]["views"] - valid[0]["views"]
+                    avg   = round(total / (len(valid) - 1)) if len(valid) > 1 else None
+
+                price_delta = None
+                valid_prices = [e for e in url_history if e.get("price") and e.get("price") != "—"]
+                if len(valid_prices) >= 2:
+                    import re as _re
+                    def _extract_num(s):
+                        nums = _re.sub(r"[^\d]", "", str(s))
+                        try: return int(nums) if nums else None
+                        except: return None
+                    prev_p = _extract_num(valid_prices[-2]["price"])
+                    curr_p = _extract_num(valid_prices[-1]["price"])
+                    if prev_p and curr_p:
+                        price_delta = curr_p - prev_p
+
+                results.append({
+                    "url": url,
+                    "title": title,
+                    "custom_name": custom_name,
+                    "views": views,
+                    "price": price,
+                    "price_delta": price_delta,
+                    "delta": delta,
+                    "avg": avg,
+                    "day": day,
+                })
+
+        finally:
+            mobile_driver.quit()
 
     save_json(DATA_FILE, history)
 
